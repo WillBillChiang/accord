@@ -1,0 +1,34 @@
+# Accord Negotiation Engine — Nitro Enclave Image
+# This image contains the entire negotiation runtime: LLM, protocol engine,
+# agent logic, and vsock communication layer. No code can be added or
+# modified after the image is built.
+
+FROM amazonlinux:2023-minimal
+
+# Install runtime dependencies
+RUN dnf install -y \
+    python3.11 \
+    python3.11-pip \
+    gcc-c++ \
+    make \
+    cmake \
+    && dnf clean all
+
+# Install Python packages
+RUN pip3.11 install --no-cache-dir \
+    llama-cpp-python==0.3.4 \
+    pydantic==2.10.* \
+    cryptography==44.0.* \
+    cbor2==5.6.* \
+    scipy==1.14.*
+
+# Copy enclave application code
+COPY . /app/
+
+# Models directory (mount or copy quantized model here)
+RUN mkdir -p /app/models
+
+WORKDIR /app
+
+# Entry point
+CMD ["python3.11", "main.py"]

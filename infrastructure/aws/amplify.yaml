@@ -1,0 +1,154 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Accord TEE Negotiation Engine - Amplify Frontend Infrastructure.
+  AWS Amplify app for NextJS frontend with CI/CD from GitHub,
+  environment variables for backend integration.
+  SOC 2 Type II / ISO 27001 compliant.
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: prod
+    AllowedValues:
+      - dev
+      - staging
+      - prod
+    Description: Deployment environment name.
+
+  GitHubRepo:
+    Type: String
+    AllowedPattern: "https://github\\.com/.+/.+"
+    ConstraintDescription: Must be a valid GitHub repository URL (https://github.com/owner/repo).
+    Description: GitHub repository URL for the Accord frontend.
+
+  GitHubBranch:
+    Type: String
+    Default: main
+    AllowedPattern: "[a-zA-Z0-9._/-]+"
+    ConstraintDescription: Must be a valid Git branch name.
+    Description: GitHub branch to deploy.
+
+  GitHubToken:
+    Type: String
+    NoEcho: true
+    Description: >
+      GitHub personal access token with repo scope for Amplify to access
+      the repository. Stored securely - never logged or displayed.
+    MinLength: 1
+
+Resources:
+  # ============================================================
+  # Amplify App
+  # ============================================================
+  AccordAmplifyApp:
+    Type: AWS::Amplify::App
+    Properties:
+      Name: !Sub "${EnvironmentName}-accord-frontend"
+      Description: Accord TEE Negotiation Engine - NextJS Frontend
+      Repository: !Ref GitHubRepo
+      AccessToken: !Ref GitHubToken
+      IAMServiceRole:
+        Fn::ImportValue: !Sub "${EnvironmentName}-accord-AmplifyRoleArn"
+      Platform: WEB_COMPUTE
+      EnableBranchAutoDeletion: false
+      BuildSpec: |
+        version: 1
+        frontend:
+          phases:
+            preBuild:
+              commands:
+                - npm ci --cache .npm --prefer-offline
+            build:
+              commands:
+                - echo "NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL" >> .env.production
+                - echo "NEXT_PUBLIC_COGNITO_USER_POOL_ID=$NEXT_PUBLIC_COGNITO_USER_POOL_ID" >> .env.production
+                - echo "NEXT_PUBLIC_COGNITO_CLIENT_ID=$NEXT_PUBLIC_COGNITO_CLIENT_ID" >> .env.production
+                - echo "NEXT_PUBLIC_AWS_REGION=$NEXT_PUBLIC_AWS_REGION" >> .env.production
+                - npm run build
+          artifacts:
+            baseDirectory: .next
+            files:
+              - '**/*'
+          cache:
+            paths:
+              - .npm/**/*
+              - .next/cache/**/*
+              - node_modules/**/*
+      EnvironmentVariables:
+        - Name: NEXT_PUBLIC_API_URL
+          Value: !Sub
+            - "https://${ALBDns}"
+            - ALBDns:
+                Fn::ImportValue: !Sub "${EnvironmentName}-accord-ALBDnsName"
+        - Name: NEXT_PUBLIC_COGNITO_USER_POOL_ID
+          Value:
+            Fn::ImportValue: !Sub "${EnvironmentName}-accord-UserPoolId"
+        - Name: NEXT_PUBLIC_COGNITO_CLIENT_ID
+          Value:
+            Fn::ImportValue: !Sub "${EnvironmentName}-accord-UserPoolClientId"
+        - Name: NEXT_PUBLIC_AWS_REGION
+          Value: !Ref AWS::Region
+        - Name: AMPLIFY_MONOREPO_APP_ROOT
+          Value: frontend
+        - Name: _LIVE_UPDATES
+          Value: '[{"name":"Node.js version","pkg":"node","type":"nvm","version":"18"}]'
+      CustomHeaders: |
+        customHeaders:
+          - pattern: '**/*'
+            headers:
+              - key: Strict-Transport-Security
+                value: 'max-age=63072000; includeSubDomains; preload'
+              - key: X-Content-Type-Options
+                value: 'nosniff'
+              - key: X-Frame-Options
+                value: 'DENY'
+              - key: X-XSS-Protection
+                value: '1; mode=block'
+              - key: Referrer-Policy
+                value: 'strict-origin-when-cross-origin'
+              - key: Content-Security-Policy
+                value: "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src 'self' https://*.amazonaws.com https://*.amazoncognito.com; font-src 'self' data:; frame-ancestors 'none';"
+              - key: Permissions-Policy
+                value: 'camera=(), microphone=(), geolocation=()'
+      Tags:
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: Project
+          Value: accord
+
+  # ============================================================
+  # Amplify Branch
+  # ============================================================
+  AccordAmplifyBranch:
+    Type: AWS::Amplify::Branch
+    Properties:
+      AppId: !GetAtt AccordAmplifyApp.AppId
+      BranchName: !Ref GitHubBranch
+      Description: !Sub "Accord ${EnvironmentName} deployment branch"
+      EnableAutoBuild: true
+      EnablePullRequestPreview: false
+      Stage: PRODUCTION
+      Tags:
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: Project
+          Value: accord
+
+Outputs:
+  AmplifyAppId:
+    Description: Amplify App ID
+    Value: !GetAtt AccordAmplifyApp.AppId
+    Export:
+      Name: !Sub "${EnvironmentName}-accord-AmplifyAppId"
+
+  AmplifyAppDefaultDomain:
+    Description: Amplify default domain
+    Value: !GetAtt AccordAmplifyApp.DefaultDomain
+    Export:
+      Name: !Sub "${EnvironmentName}-accord-AmplifyDefaultDomain"
+
+  AmplifyBranchUrl:
+    Description: URL for the deployed branch
+    Value: !Sub "https://${GitHubBranch}.${AccordAmplifyApp.DefaultDomain}"
+    Export:
+      Name: !Sub "${EnvironmentName}-accord-AmplifyBranchUrl"

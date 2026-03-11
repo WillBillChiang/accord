@@ -1,0 +1,18 @@
+runConfig:
+  runtime: nodejs20
+  concurrency: 80
+  cpu: 1
+  memoryMiB: 512
+  minInstances: 0
+  maxInstances: 10
+env:
+  - variable: NEXT_PUBLIC_API_URL
+    value: ""
+  - variable: NEXT_PUBLIC_WS_URL
+    value: ""
+  - variable: NEXT_PUBLIC_FIREBASE_API_KEY
+    secret: FIREBASE_API_KEY
+  - variable: NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN
+    value: ""
+  - variable: NEXT_PUBLIC_FIREBASE_PROJECT_ID
+    value: ""

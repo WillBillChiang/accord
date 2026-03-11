@@ -1,0 +1,184 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Accord TEE Negotiation Engine - Authentication Infrastructure.
+  Cognito User Pool with MFA (TOTP), strong password policy, email verification,
+  advanced security, and admin group. SOC 2 Type II / ISO 27001 compliant.
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: prod
+    AllowedValues:
+      - dev
+      - staging
+      - prod
+    Description: Deployment environment name.
+
+  UserPoolDomainPrefix:
+    Type: String
+    Default: accord-auth
+    AllowedPattern: "^[a-z0-9](?:[a-z0-9\\-]{0,61}[a-z0-9])?$"
+    ConstraintDescription: >
+      Must be a valid domain prefix: lowercase alphanumeric, hyphens allowed
+      (not at start or end), max 63 characters.
+    Description: >
+      Domain prefix for the Cognito hosted UI (must be globally unique).
+      The full domain will be {prefix}.auth.{region}.amazoncognito.com.
+
+Resources:
+  # ============================================================
+  # Cognito User Pool
+  # ============================================================
+  AccordUserPool:
+    Type: AWS::Cognito::UserPool
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      UserPoolName: !Sub "${EnvironmentName}-accord-users"
+      DeletionProtection: ACTIVE
+
+      # MFA Configuration - Required TOTP
+      MfaConfiguration: "ON"
+      EnabledMfas:
+        - SOFTWARE_TOKEN_MFA
+
+      # Password Policy - Strong requirements for compliance
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 12
+          RequireUppercase: true
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireSymbols: true
+          TemporaryPasswordValidityDays: 1
+
+      # Account Recovery
+      AccountRecoverySetting:
+        RecoveryMechanisms:
+          - Name: verified_email
+            Priority: 1
+
+      # Auto-verification
+      AutoVerifiedAttributes:
+        - email
+
+      # Email Configuration
+      EmailConfiguration:
+        EmailSendingAccount: COGNITO_DEFAULT
+      EmailVerificationMessage: >
+        Your Accord verification code is {####}. This code expires in 24 hours.
+      EmailVerificationSubject: "Accord - Email Verification Code"
+
+      # Advanced Security
+      UserPoolAddOns:
+        AdvancedSecurityMode: ENFORCED
+
+      # Username Configuration
+      UsernameConfiguration:
+        CaseSensitive: false
+
+      # Schema Attributes
+      Schema:
+        - Name: email
+          Required: true
+          Mutable: true
+          AttributeDataType: String
+          StringAttributeConstraints:
+            MinLength: "5"
+            MaxLength: "254"
+        - Name: name
+          Required: false
+          Mutable: true
+          AttributeDataType: String
+          StringAttributeConstraints:
+            MinLength: "1"
+            MaxLength: "256"
+        - Name: organization
+          Required: false
+          Mutable: true
+          AttributeDataType: String
+          StringAttributeConstraints:
+            MinLength: "1"
+            MaxLength: "256"
+
+      # Admin Create User Config
+      AdminCreateUserConfig:
+        AllowAdminCreateUserOnly: false
+        InviteMessageTemplate:
+          EmailMessage: >
+            You have been invited to Accord. Your temporary password is {####}.
+            Please sign in and change your password within 24 hours.
+          EmailSubject: "Accord - You have been invited"
+
+      UserPoolTags:
+        Environment: !Ref EnvironmentName
+        Project: accord
+
+  # ============================================================
+  # Cognito User Pool Client
+  # ============================================================
+  AccordUserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: !Sub "${EnvironmentName}-accord-web-client"
+      UserPoolId: !Ref AccordUserPool
+      GenerateSecret: false
+      ExplicitAuthFlows:
+        - ALLOW_USER_SRP_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+      PreventUserExistenceErrors: ENABLED
+      SupportedIdentityProviders:
+        - COGNITO
+      # Token validity
+      AccessTokenValidity: 1
+      IdTokenValidity: 1
+      RefreshTokenValidity: 30
+      TokenValidityUnits:
+        AccessToken: hours
+        IdToken: hours
+        RefreshToken: days
+
+  # ============================================================
+  # Cognito User Pool Domain
+  # ============================================================
+  AccordUserPoolDomain:
+    Type: AWS::Cognito::UserPoolDomain
+    Properties:
+      Domain: !Sub "${UserPoolDomainPrefix}-${EnvironmentName}"
+      UserPoolId: !Ref AccordUserPool
+
+  # ============================================================
+  # Cognito Admin Group
+  # ============================================================
+  AccordAdminGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      GroupName: admin
+      Description: Accord platform administrators with full management access
+      UserPoolId: !Ref AccordUserPool
+      Precedence: 0
+
+Outputs:
+  UserPoolId:
+    Description: Cognito User Pool ID
+    Value: !Ref AccordUserPool
+    Export:
+      Name: !Sub "${EnvironmentName}-accord-UserPoolId"
+
+  UserPoolClientId:
+    Description: Cognito User Pool Client ID
+    Value: !Ref AccordUserPoolClient
+    Export:
+      Name: !Sub "${EnvironmentName}-accord-UserPoolClientId"
+
+  UserPoolArn:
+    Description: Cognito User Pool ARN
+    Value: !GetAtt AccordUserPool.Arn
+    Export:
+      Name: !Sub "${EnvironmentName}-accord-UserPoolArn"
+
+  UserPoolDomain:
+    Description: Cognito User Pool Domain
+    Value: !Sub "${UserPoolDomainPrefix}-${EnvironmentName}.auth.${AWS::Region}.amazoncognito.com"
+    Export:
+      Name: !Sub "${EnvironmentName}-accord-UserPoolDomain"

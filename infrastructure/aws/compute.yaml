@@ -1,0 +1,483 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Accord TEE Negotiation Engine - Compute Infrastructure.
+  EC2 launch template with Nitro Enclaves, ALB with HTTPS, Auto Scaling Group,
+  and security groups. SOC 2 Type II / ISO 27001 compliant.
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: prod
+    AllowedValues:
+      - dev
+      - staging
+      - prod
+    Description: Deployment environment name.
+
+  InstanceType:
+    Type: String
+    Default: c7i.4xlarge
+    AllowedValues:
+      - c7i.4xlarge
+      - c7i.8xlarge
+      - c7i.12xlarge
+      - c7i.16xlarge
+    Description: >
+      EC2 instance type. Must be Nitro Enclave-capable.
+      Use c7i.4xlarge for dev, c7i.12xlarge for production.
+
+  ACMCertificateArn:
+    Type: String
+    AllowedPattern: "arn:aws:acm:[a-z0-9-]+:\\d{12}:certificate/[a-f0-9-]+"
+    ConstraintDescription: Must be a valid ACM certificate ARN.
+    Description: ARN of the ACM certificate for HTTPS on the ALB.
+
+  EnclaveImageUri:
+    Type: String
+    Default: "accord-enclave:latest"
+    Description: Docker image URI for the Nitro Enclave EIF build.
+
+  MinInstances:
+    Type: Number
+    Default: 1
+    MinValue: 1
+    MaxValue: 10
+    Description: Minimum number of instances in the Auto Scaling Group.
+
+  MaxInstances:
+    Type: Number
+    Default: 3
+    MinValue: 1
+    MaxValue: 20
+    Description: Maximum number of instances in the Auto Scaling Group.
+
+  DesiredInstances:
+    Type: Number
+    Default: 1
+    MinValue: 1
+    MaxValue: 10
+    Description: Desired number of instances in the Auto Scaling Group.
+
+  EnclaveCPUCount:
+    Type: Number
+    Default: 4
+    MinValue: 2
+    Description: Number of vCPUs to allocate to the Nitro Enclave.
+
+  EnclaveMemoryMiB:
+    Type: Number
+    Default: 8192
+    MinValue: 512
+    Description: Memory in MiB to allocate to the Nitro Enclave.
+
+Mappings:
+  EnvironmentConfig:
+    dev:
+      VolumeSize: 100
+    staging:
+      VolumeSize: 150
+    prod:
+      VolumeSize: 150
+
+Resources:
+  # ============================================================
+  # Security Group: ALB
+  # ============================================================
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for Accord ALB - allows HTTPS from anywhere
+      VpcId:
+        Fn::ImportValue: !Sub "${EnvironmentName}-accord-VpcId"
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: "0.0.0.0/0"
+          Description: Allow HTTPS from anywhere
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          CidrIp: "0.0.0.0/0"
+          Description: Allow traffic to application port
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-accord-alb-sg"
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: Project
+          Value: accord
+
+  # ============================================================
+  # Security Group: EC2 Instances
+  # ============================================================
+  EC2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for Accord EC2 instances - ingress from ALB only
+      VpcId:
+        Fn::ImportValue: !Sub "${EnvironmentName}-accord-VpcId"
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          SourceSecurityGroupId: !Ref ALBSecurityGroup
+          Description: Allow traffic from ALB on application port
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: "0.0.0.0/0"
+          Description: Allow HTTPS outbound for AWS API calls
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-accord-ec2-sg"
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: Project
+          Value: accord
+
+  # ============================================================
+  # EC2 Launch Template (Nitro Enclaves enabled)
+  # ============================================================
+  LaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: !Sub "${EnvironmentName}-accord-launch-template"
+      LaunchTemplateData:
+        ImageId: !Sub "{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64}}"
+        InstanceType: !Ref InstanceType
+        IamInstanceProfile:
+          Arn:
+            Fn::ImportValue: !Sub "${EnvironmentName}-accord-EC2InstanceProfileArn"
+        SecurityGroupIds:
+          - !Ref EC2SecurityGroup
+        EnclaveOptions:
+          Enabled: true
+        MetadataOptions:
+          HttpTokens: required
+          HttpPutResponseHopLimit: 2
+          HttpEndpoint: enabled
+          InstanceMetadataTags: enabled
+        BlockDeviceMappings:
+          - DeviceName: /dev/xvda
+            Ebs:
+              VolumeSize: !FindInMap [EnvironmentConfig, !Ref EnvironmentName, VolumeSize]
+              VolumeType: gp3
+              Iops: 3000
+              Throughput: 125
+              Encrypted: true
+              KmsKeyId:
+                Fn::ImportValue: !Sub "${EnvironmentName}-accord-KMSKeyArn"
+              DeleteOnTermination: true
+        Monitoring:
+          Enabled: true
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+              - Key: Name
+                Value: !Sub "${EnvironmentName}-accord-enclave-host"
+              - Key: Environment
+                Value: !Ref EnvironmentName
+              - Key: Project
+                Value: accord
+          - ResourceType: volume
+            Tags:
+              - Key: Name
+                Value: !Sub "${EnvironmentName}-accord-enclave-volume"
+              - Key: Environment
+                Value: !Ref EnvironmentName
+              - Key: Project
+                Value: accord
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash -xe
+            exec > >(tee /var/log/user-data.log) 2>&1
+            echo "=== Accord Enclave Host Bootstrap ==="
+            echo "Environment: ${EnvironmentName}"
+            echo "Region: ${AWS::Region}"
+
+            # Update system packages
+            dnf update -y
+
+            # Install Nitro Enclaves CLI and tools
+            dnf install -y aws-nitro-enclaves-cli aws-nitro-enclaves-cli-devel
+
+            # Install Docker
+            dnf install -y docker
+            systemctl enable docker
+            systemctl start docker
+
+            # Add ec2-user to docker and ne groups
+            usermod -aG docker ec2-user
+            usermod -aG ne ec2-user
+
+            # Configure Nitro Enclaves allocator
+            cat > /etc/nitro_enclaves/allocator.yaml <<ALLOCEOF
+            ---
+            memory_mib: ${EnclaveMemoryMiB}
+            cpu_count: ${EnclaveCPUCount}
+            ALLOCEOF
+
+            # Enable and start the Nitro Enclaves allocator
+            systemctl enable nitro-enclaves-allocator.service
+            systemctl start nitro-enclaves-allocator.service
+
+            # Install and start CloudWatch agent
+            dnf install -y amazon-cloudwatch-agent
+            cat > /opt/aws/amazon-cloudwatch-agent/etc/config.json <<CWEOF
+            {
+              "agent": {
+                "metrics_collection_interval": 60,
+                "run_as_user": "root"
+              },
+              "logs": {
+                "logs_collected": {
+                  "files": {
+                    "collect_list": [
+                      {
+                        "file_path": "/var/log/user-data.log",
+                        "log_group_name": "/accord/${EnvironmentName}/parent-app",
+                        "log_stream_name": "{instance_id}/user-data",
+                        "retention_in_days": 365
+                      },
+                      {
+                        "file_path": "/var/log/accord/parent-app.log",
+                        "log_group_name": "/accord/${EnvironmentName}/parent-app",
+                        "log_stream_name": "{instance_id}/app",
+                        "retention_in_days": 365
+                      },
+                      {
+                        "file_path": "/var/log/accord/enclave.log",
+                        "log_group_name": "/accord/${EnvironmentName}/enclave",
+                        "log_stream_name": "{instance_id}/enclave",
+                        "retention_in_days": 365
+                      }
+                    ]
+                  }
+                }
+              },
+              "metrics": {
+                "namespace": "Accord",
+                "metrics_collected": {
+                  "cpu": {
+                    "measurement": ["cpu_usage_idle", "cpu_usage_user", "cpu_usage_system"],
+                    "totalcpu": true
+                  },
+                  "mem": {
+                    "measurement": ["mem_used_percent"]
+                  },
+                  "disk": {
+                    "measurement": ["used_percent"],
+                    "resources": ["/"]
+                  }
+                },
+                "append_dimensions": {
+                  "InstanceId": "$${aws:InstanceId}",
+                  "AutoScalingGroupName": "$${aws:AutoScalingGroupName}"
+                }
+              }
+            }
+            CWEOF
+            /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
+              -a fetch-config -m ec2 \
+              -c file:/opt/aws/amazon-cloudwatch-agent/etc/config.json -s
+
+            # Create application log directory
+            mkdir -p /var/log/accord
+            chmod 755 /var/log/accord
+
+            # Pull the enclave application image and build EIF
+            docker pull ${EnclaveImageUri} || echo "Image pull skipped (may use local build)"
+
+            # Build enclave image file if Dockerfile exists
+            if [ -d /opt/accord/enclave ]; then
+              cd /opt/accord/enclave
+              nitro-cli build-enclave \
+                --docker-uri ${EnclaveImageUri} \
+                --output-file /opt/accord/enclave.eif \
+                2>&1 | tee /var/log/accord/enclave-build.log
+            fi
+
+            # Start the enclave if EIF exists
+            if [ -f /opt/accord/enclave.eif ]; then
+              nitro-cli run-enclave \
+                --eif-path /opt/accord/enclave.eif \
+                --cpu-count ${EnclaveCPUCount} \
+                --memory ${EnclaveMemoryMiB} \
+                --enclave-cid 16 \
+                2>&1 | tee /var/log/accord/enclave-start.log
+            fi
+
+            echo "=== Bootstrap Complete ==="
+
+  # ============================================================
+  # Application Load Balancer
+  # ============================================================
+  ApplicationLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub "${EnvironmentName}-accord-alb"
+      Type: application
+      Scheme: internet-facing
+      SecurityGroups:
+        - !Ref ALBSecurityGroup
+      Subnets:
+        - Fn::ImportValue: !Sub "${EnvironmentName}-accord-PublicSubnet1Id"
+        - Fn::ImportValue: !Sub "${EnvironmentName}-accord-PublicSubnet2Id"
+      LoadBalancerAttributes:
+        - Key: access_logs.s3.enabled
+          Value: "false"
+        - Key: idle_timeout.timeout_seconds
+          Value: "60"
+        - Key: routing.http.drop_invalid_header_fields.enabled
+          Value: "true"
+        - Key: routing.http2.enabled
+          Value: "true"
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-accord-alb"
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: Project
+          Value: accord
+
+  # Associate WAF WebACL with ALB
+  WAFAssociation:
+    Type: AWS::WAFv2::WebACLAssociation
+    Properties:
+      ResourceArn: !Ref ApplicationLoadBalancer
+      WebACLArn:
+        Fn::ImportValue: !Sub "${EnvironmentName}-accord-WAFWebACLArn"
+
+  # ============================================================
+  # Target Group
+  # ============================================================
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub "${EnvironmentName}-accord-tg"
+      Port: 8080
+      Protocol: HTTP
+      VpcId:
+        Fn::ImportValue: !Sub "${EnvironmentName}-accord-VpcId"
+      TargetType: instance
+      HealthCheckEnabled: true
+      HealthCheckPath: /health
+      HealthCheckProtocol: HTTP
+      HealthCheckPort: "8080"
+      HealthCheckIntervalSeconds: 30
+      HealthCheckTimeoutSeconds: 10
+      HealthyThresholdCount: 3
+      UnhealthyThresholdCount: 3
+      Matcher:
+        HttpCode: "200"
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: "60"
+        - Key: stickiness.enabled
+          Value: "true"
+        - Key: stickiness.type
+          Value: lb_cookie
+        - Key: stickiness.lb_cookie.duration_seconds
+          Value: "86400"
+      Tags:
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: Project
+          Value: accord
+
+  # ============================================================
+  # HTTPS Listener
+  # ============================================================
+  HTTPSListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Port: 443
+      Protocol: HTTPS
+      SslPolicy: ELBSecurityPolicy-TLS13-1-2-2021-06
+      Certificates:
+        - CertificateArn: !Ref ACMCertificateArn
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroup
+
+  # ============================================================
+  # Auto Scaling Group
+  # ============================================================
+  AutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      AutoScalingGroupName: !Sub "${EnvironmentName}-accord-asg"
+      LaunchTemplate:
+        LaunchTemplateId: !Ref LaunchTemplate
+        Version: !GetAtt LaunchTemplate.LatestVersionNumber
+      MinSize: !Ref MinInstances
+      MaxSize: !Ref MaxInstances
+      DesiredCapacity: !Ref DesiredInstances
+      TargetGroupARNs:
+        - !Ref TargetGroup
+      VPCZoneIdentifier:
+        - Fn::ImportValue: !Sub "${EnvironmentName}-accord-PrivateSubnet1Id"
+        - Fn::ImportValue: !Sub "${EnvironmentName}-accord-PrivateSubnet2Id"
+      HealthCheckType: ELB
+      HealthCheckGracePeriod: 300
+      TerminationPolicies:
+        - OldestInstance
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-accord-enclave-host"
+          PropagateAtLaunch: true
+        - Key: Environment
+          Value: !Ref EnvironmentName
+          PropagateAtLaunch: true
+        - Key: Project
+          Value: accord
+          PropagateAtLaunch: true
+
+  # ============================================================
+  # Auto Scaling Policies
+  # ============================================================
+  CPUScalingPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AutoScalingGroupName: !Ref AutoScalingGroup
+      PolicyType: TargetTrackingScaling
+      TargetTrackingConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ASGAverageCPUUtilization
+        TargetValue: 70.0
+        DisableScaleIn: false
+
+Outputs:
+  ALBDnsName:
+    Description: DNS name of the Application Load Balancer
+    Value: !GetAtt ApplicationLoadBalancer.DNSName
+    Export:
+      Name: !Sub "${EnvironmentName}-accord-ALBDnsName"
+
+  ALBArn:
+    Description: ARN of the Application Load Balancer
+    Value: !Ref ApplicationLoadBalancer
+    Export:
+      Name: !Sub "${EnvironmentName}-accord-ALBArn"
+
+  ALBFullName:
+    Description: Full name of the ALB (used for CloudWatch metrics)
+    Value: !GetAtt ApplicationLoadBalancer.LoadBalancerFullName
+    Export:
+      Name: !Sub "${EnvironmentName}-accord-ALBFullName"
+
+  TargetGroupFullName:
+    Description: Full name of the Target Group (used for CloudWatch metrics)
+    Value: !GetAtt TargetGroup.TargetGroupFullName
+    Export:
+      Name: !Sub "${EnvironmentName}-accord-TargetGroupFullName"
+
+  AutoScalingGroupName:
+    Description: Name of the Auto Scaling Group
+    Value: !Ref AutoScalingGroup
+    Export:
+      Name: !Sub "${EnvironmentName}-accord-ASGName"

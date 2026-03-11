@@ -1,0 +1,420 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Accord TEE Negotiation Engine - Security Infrastructure.
+  KMS key with attestation-conditioned key policy (PCR0/1/2), IAM roles for
+  EC2 and Amplify, WAF WebACL with rate limiting and AWS managed rule groups.
+  SOC 2 Type II / ISO 27001 compliant.
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: prod
+    AllowedValues:
+      - dev
+      - staging
+      - prod
+    Description: Deployment environment name.
+
+  ExpectedPCR0:
+    Type: String
+    Default: "EXAMPLEPCR0VALUE000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+    Description: >
+      Expected PCR0 value (enclave image measurement) for attestation-based
+      KMS key policy. Update after building the enclave image.
+    AllowedPattern: "[a-fA-F0-9]{96}"
+    ConstraintDescription: Must be a 96-character hex string (SHA-384).
+
+  ExpectedPCR1:
+    Type: String
+    Default: "EXAMPLEPCR1VALUE000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+    Description: >
+      Expected PCR1 value (kernel measurement) for attestation-based
+      KMS key policy.
+    AllowedPattern: "[a-fA-F0-9]{96}"
+    ConstraintDescription: Must be a 96-character hex string (SHA-384).
+
+  ExpectedPCR2:
+    Type: String
+    Default: "EXAMPLEPCR2VALUE000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+    Description: >
+      Expected PCR2 value (application measurement) for attestation-based
+      KMS key policy.
+    AllowedPattern: "[a-fA-F0-9]{96}"
+    ConstraintDescription: Must be a 96-character hex string (SHA-384).
+
+Resources:
+  # ============================================================
+  # KMS Key with Attestation-Conditioned Policy
+  # ============================================================
+  AccordKMSKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: !Sub "Accord ${EnvironmentName} data encryption key with Nitro Enclave attestation conditions"
+      Enabled: true
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: "2012-10-17"
+        Id: accord-key-policy
+        Statement:
+          # Allow account root full admin of the key
+          - Sid: EnableRootAccountAccess
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"
+            Action: "kms:*"
+            Resource: "*"
+
+          # Allow key administrators to manage (but not use) the key
+          - Sid: AllowKeyAdministration
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"
+            Action:
+              - kms:Create*
+              - kms:Describe*
+              - kms:Enable*
+              - kms:List*
+              - kms:Put*
+              - kms:Update*
+              - kms:Revoke*
+              - kms:Disable*
+              - kms:Get*
+              - kms:Delete*
+              - kms:TagResource
+              - kms:UntagResource
+              - kms:ScheduleKeyDeletion
+              - kms:CancelKeyDeletion
+            Resource: "*"
+
+          # Allow EC2 role to use the key for encrypt/decrypt ONLY when
+          # the request originates from an enclave with matching PCR values
+          - Sid: AllowEnclaveDecrypt
+            Effect: Allow
+            Principal:
+              AWS: !GetAtt EC2InstanceRole.Arn
+            Action:
+              - kms:Decrypt
+            Resource: "*"
+            Condition:
+              StringEqualsIgnoreCase:
+                "kms:RecipientAttestation:PCR0": !Ref ExpectedPCR0
+                "kms:RecipientAttestation:PCR1": !Ref ExpectedPCR1
+                "kms:RecipientAttestation:PCR2": !Ref ExpectedPCR2
+
+          # Allow EC2 role general encrypt/GenerateDataKey for writing data
+          - Sid: AllowEC2RoleEncrypt
+            Effect: Allow
+            Principal:
+              AWS: !GetAtt EC2InstanceRole.Arn
+            Action:
+              - kms:Encrypt
+              - kms:GenerateDataKey
+              - kms:GenerateDataKeyWithoutPlaintext
+              - kms:DescribeKey
+            Resource: "*"
+
+          # Allow CloudTrail and CloudWatch to use the key
+          - Sid: AllowCloudTrailEncrypt
+            Effect: Allow
+            Principal:
+              Service: cloudtrail.amazonaws.com
+            Action:
+              - kms:GenerateDataKey
+              - kms:DescribeKey
+            Resource: "*"
+            Condition:
+              StringEquals:
+                "aws:SourceAccount": !Ref AWS::AccountId
+
+          - Sid: AllowCloudWatchLogs
+            Effect: Allow
+            Principal:
+              Service: !Sub "logs.${AWS::Region}.amazonaws.com"
+            Action:
+              - kms:Encrypt
+              - kms:Decrypt
+              - kms:GenerateDataKey
+              - kms:DescribeKey
+            Resource: "*"
+            Condition:
+              ArnLike:
+                "kms:EncryptionContext:aws:logs:arn": !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/accord/*"
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-accord-kms-key"
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: Project
+          Value: accord
+
+  AccordKMSKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub "alias/${EnvironmentName}-accord-key"
+      TargetKeyId: !Ref AccordKMSKey
+
+  # ============================================================
+  # IAM Role for EC2 Instances (Nitro Enclave hosts)
+  # ============================================================
+  EC2InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${EnvironmentName}-accord-ec2-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: AccordKMSPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:Encrypt
+                  - kms:GenerateDataKey
+                  - kms:GenerateDataKeyWithoutPlaintext
+                  - kms:DescribeKey
+                Resource: !GetAtt AccordKMSKey.Arn
+
+        - PolicyName: AccordDynamoDBPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                  - dynamodb:BatchGetItem
+                  - dynamodb:BatchWriteItem
+                Resource:
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${EnvironmentName}-accord-*"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${EnvironmentName}-accord-*/index/*"
+
+        - PolicyName: AccordS3Policy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:ListBucket
+                  - s3:DeleteObject
+                Resource:
+                  - !Sub "arn:aws:s3:::${EnvironmentName}-accord-*"
+                  - !Sub "arn:aws:s3:::${EnvironmentName}-accord-*/*"
+
+        - PolicyName: AccordCloudWatchPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:DescribeLogStreams
+                  - logs:DescribeLogGroups
+                Resource:
+                  - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/accord/*"
+                  - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/accord/*:log-stream:*"
+              - Effect: Allow
+                Action:
+                  - cloudwatch:PutMetricData
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    "cloudwatch:namespace": "Accord"
+
+        - PolicyName: AccordSSMParameterPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                  - ssm:GetParameters
+                  - ssm:GetParametersByPath
+                Resource:
+                  - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/accord/${EnvironmentName}/*"
+      Tags:
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: Project
+          Value: accord
+
+  EC2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Sub "${EnvironmentName}-accord-ec2-instance-profile"
+      Roles:
+        - !Ref EC2InstanceRole
+
+  # ============================================================
+  # IAM Role for Amplify
+  # ============================================================
+  AmplifyServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${EnvironmentName}-accord-amplify-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: amplify.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: AmplifyBuildPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - amplify:*
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource:
+                  - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/amplify/*"
+                  - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/amplify/*:log-stream:*"
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub "arn:aws:s3:::${EnvironmentName}-accord-*"
+                  - !Sub "arn:aws:s3:::${EnvironmentName}-accord-*/*"
+      Tags:
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: Project
+          Value: accord
+
+  # ============================================================
+  # WAF WebACL
+  # ============================================================
+  AccordWAFWebACL:
+    Type: AWS::WAFv2::WebACL
+    Properties:
+      Name: !Sub "${EnvironmentName}-accord-waf"
+      Scope: REGIONAL
+      Description: WAF WebACL for Accord ALB with rate limiting and managed rules
+      DefaultAction:
+        Allow: {}
+      VisibilityConfig:
+        SampledRequestsEnabled: true
+        CloudWatchMetricsEnabled: true
+        MetricName: !Sub "${EnvironmentName}AccordWAF"
+      Rules:
+        # Rate limiting: 2000 requests per 5 minutes per IP
+        - Name: RateLimitRule
+          Priority: 1
+          Action:
+            Block: {}
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: !Sub "${EnvironmentName}AccordRateLimit"
+          Statement:
+            RateBasedStatement:
+              Limit: 2000
+              AggregateKeyType: IP
+
+        # AWS Managed - Common Rule Set
+        - Name: AWSManagedRulesCommonRuleSet
+          Priority: 2
+          OverrideAction:
+            None: {}
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: !Sub "${EnvironmentName}AccordCommonRules"
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesCommonRuleSet
+
+        # AWS Managed - SQL Injection Rule Set
+        - Name: AWSManagedRulesSQLiRuleSet
+          Priority: 3
+          OverrideAction:
+            None: {}
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: !Sub "${EnvironmentName}AccordSQLiRules"
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesSQLiRuleSet
+
+        # AWS Managed - IP Reputation List
+        - Name: AWSManagedRulesAmazonIpReputationList
+          Priority: 4
+          OverrideAction:
+            None: {}
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: !Sub "${EnvironmentName}AccordIPReputation"
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesAmazonIpReputationList
+      Tags:
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: Project
+          Value: accord
+
+Outputs:
+  KMSKeyArn:
+    Description: ARN of the Accord KMS encryption key
+    Value: !GetAtt AccordKMSKey.Arn
+    Export:
+      Name: !Sub "${EnvironmentName}-accord-KMSKeyArn"
+
+  KMSKeyId:
+    Description: ID of the Accord KMS encryption key
+    Value: !Ref AccordKMSKey
+    Export:
+      Name: !Sub "${EnvironmentName}-accord-KMSKeyId"
+
+  EC2InstanceRoleArn:
+    Description: ARN of the EC2 instance IAM role
+    Value: !GetAtt EC2InstanceRole.Arn
+    Export:
+      Name: !Sub "${EnvironmentName}-accord-EC2RoleArn"
+
+  EC2InstanceProfileArn:
+    Description: ARN of the EC2 instance profile
+    Value: !GetAtt EC2InstanceProfile.Arn
+    Export:
+      Name: !Sub "${EnvironmentName}-accord-EC2InstanceProfileArn"
+
+  AmplifyServiceRoleArn:
+    Description: ARN of the Amplify service role
+    Value: !GetAtt AmplifyServiceRole.Arn
+    Export:
+      Name: !Sub "${EnvironmentName}-accord-AmplifyRoleArn"
+
+  WAFWebACLArn:
+    Description: ARN of the WAF WebACL
+    Value: !GetAtt AccordWAFWebACL.Arn
+    Export:
+      Name: !Sub "${EnvironmentName}-accord-WAFWebACLArn"

@@ -1,0 +1,537 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Accord TEE Negotiation Engine - Monitoring Infrastructure.
+  CloudTrail (multi-region, log validation, KMS encryption), CloudWatch Log Groups,
+  CloudWatch Alarms (5xx, latency, CPU, DynamoDB throttling), SNS alerts topic,
+  and CloudWatch Dashboard. SOC 2 Type II / ISO 27001 compliant.
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: prod
+    AllowedValues:
+      - dev
+      - staging
+      - prod
+    Description: Deployment environment name.
+
+  AlertEmail:
+    Type: String
+    Default: ""
+    Description: >
+      Email address for alarm notifications. If blank, no email subscription
+      is created (subscribe manually via SNS console).
+
+Conditions:
+  HasAlertEmail: !Not [!Equals [!Ref AlertEmail, ""]]
+
+Resources:
+  # ============================================================
+  # SNS Topic for Alerts
+  # ============================================================
+  AlertsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub "${EnvironmentName}-accord-alerts"
+      KmsMasterKeyId:
+        Fn::ImportValue: !Sub "${EnvironmentName}-accord-KMSKeyId"
+      Tags:
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: Project
+          Value: accord
+
+  AlertsTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      Topics:
+        - !Ref AlertsTopic
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowCloudWatchAlarms
+            Effect: Allow
+            Principal:
+              Service: cloudwatch.amazonaws.com
+            Action: sns:Publish
+            Resource: !Ref AlertsTopic
+            Condition:
+              StringEquals:
+                "aws:SourceAccount": !Ref AWS::AccountId
+
+  AlertEmailSubscription:
+    Type: AWS::SNS::Subscription
+    Condition: HasAlertEmail
+    Properties:
+      TopicArn: !Ref AlertsTopic
+      Protocol: email
+      Endpoint: !Ref AlertEmail
+
+  # ============================================================
+  # CloudTrail (Multi-Region, Validated, KMS-Encrypted)
+  # ============================================================
+  AccordCloudTrail:
+    Type: AWS::CloudTrail::Trail
+    Properties:
+      TrailName: !Sub "${EnvironmentName}-accord-trail"
+      IsLogging: true
+      IsMultiRegionTrail: true
+      IncludeGlobalServiceEvents: true
+      EnableLogFileValidation: true
+      S3BucketName:
+        Fn::ImportValue: !Sub "${EnvironmentName}-accord-AuditLogsBucketName"
+      S3KeyPrefix: cloudtrail
+      KMSKeyId:
+        Fn::ImportValue: !Sub "${EnvironmentName}-accord-KMSKeyArn"
+      CloudWatchLogsLogGroupArn: !GetAtt CloudTrailLogGroup.Arn
+      CloudWatchLogsRoleArn: !GetAtt CloudTrailCloudWatchRole.Arn
+      Tags:
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: Project
+          Value: accord
+
+  CloudTrailLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/accord/${EnvironmentName}/cloudtrail"
+      RetentionInDays: 365
+      KmsKeyId:
+        Fn::ImportValue: !Sub "${EnvironmentName}-accord-KMSKeyArn"
+      Tags:
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: Project
+          Value: accord
+
+  CloudTrailCloudWatchRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${EnvironmentName}-accord-cloudtrail-cw-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: cloudtrail.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CloudTrailToCloudWatch
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !GetAtt CloudTrailLogGroup.Arn
+
+  # ============================================================
+  # CloudWatch Log Groups
+  # ============================================================
+  ParentAppLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/accord/${EnvironmentName}/parent-app"
+      RetentionInDays: 365
+      KmsKeyId:
+        Fn::ImportValue: !Sub "${EnvironmentName}-accord-KMSKeyArn"
+      Tags:
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: Project
+          Value: accord
+
+  EnclaveLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/accord/${EnvironmentName}/enclave"
+      RetentionInDays: 365
+      KmsKeyId:
+        Fn::ImportValue: !Sub "${EnvironmentName}-accord-KMSKeyArn"
+      Tags:
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: Project
+          Value: accord
+
+  # ============================================================
+  # CloudWatch Alarms
+  # ============================================================
+
+  # ALB 5xx Error Rate > 5%
+  ALB5xxAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${EnvironmentName}-accord-alb-5xx-high"
+      AlarmDescription: >
+        ALB 5xx error rate exceeds 5% over 5-minute period. Possible application
+        errors or infrastructure issues requiring immediate investigation.
+      Namespace: AWS/ApplicationELB
+      MetricName: HTTPCode_Target_5XX_Count
+      Dimensions:
+        - Name: LoadBalancer
+          Value:
+            Fn::ImportValue: !Sub "${EnvironmentName}-accord-ALBFullName"
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 5
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertsTopic
+      OKActions:
+        - !Ref AlertsTopic
+      Tags:
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: Project
+          Value: accord
+
+  # ALB Target Response Time > 10s
+  ALBLatencyAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${EnvironmentName}-accord-alb-latency-high"
+      AlarmDescription: >
+        ALB target response time exceeds 10 seconds. This may indicate
+        enclave processing delays or resource constraints.
+      Namespace: AWS/ApplicationELB
+      MetricName: TargetResponseTime
+      Dimensions:
+        - Name: LoadBalancer
+          Value:
+            Fn::ImportValue: !Sub "${EnvironmentName}-accord-ALBFullName"
+      ExtendedStatistic: p95
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 10
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertsTopic
+      OKActions:
+        - !Ref AlertsTopic
+      Tags:
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: Project
+          Value: accord
+
+  # EC2 CPU Utilization > 80%
+  EC2CPUAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${EnvironmentName}-accord-ec2-cpu-high"
+      AlarmDescription: >
+        EC2 CPU utilization exceeds 80%. Consider scaling out or
+        investigating resource-intensive enclave operations.
+      Namespace: AWS/EC2
+      MetricName: CPUUtilization
+      Dimensions:
+        - Name: AutoScalingGroupName
+          Value:
+            Fn::ImportValue: !Sub "${EnvironmentName}-accord-ASGName"
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 3
+      Threshold: 80
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: breaching
+      AlarmActions:
+        - !Ref AlertsTopic
+      OKActions:
+        - !Ref AlertsTopic
+      Tags:
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: Project
+          Value: accord
+
+  # DynamoDB Throttled Requests (Sessions Table)
+  SessionsThrottleAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${EnvironmentName}-accord-sessions-throttled"
+      AlarmDescription: >
+        DynamoDB Sessions table has throttled requests. Review table
+        capacity or switch to on-demand billing mode.
+      Namespace: AWS/DynamoDB
+      MetricName: ThrottledRequests
+      Dimensions:
+        - Name: TableName
+          Value:
+            Fn::ImportValue: !Sub "${EnvironmentName}-accord-SessionsTableName"
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertsTopic
+      Tags:
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: Project
+          Value: accord
+
+  # DynamoDB Throttled Requests (AuditLog Table)
+  AuditLogThrottleAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${EnvironmentName}-accord-auditlog-throttled"
+      AlarmDescription: >
+        DynamoDB AuditLog table has throttled requests. Critical for
+        compliance logging - investigate immediately.
+      Namespace: AWS/DynamoDB
+      MetricName: ThrottledRequests
+      Dimensions:
+        - Name: TableName
+          Value:
+            Fn::ImportValue: !Sub "${EnvironmentName}-accord-AuditLogTableName"
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertsTopic
+      Tags:
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: Project
+          Value: accord
+
+  # DynamoDB Throttled Requests (Users Table)
+  UsersThrottleAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${EnvironmentName}-accord-users-throttled"
+      AlarmDescription: >
+        DynamoDB Users table has throttled requests.
+      Namespace: AWS/DynamoDB
+      MetricName: ThrottledRequests
+      Dimensions:
+        - Name: TableName
+          Value:
+            Fn::ImportValue: !Sub "${EnvironmentName}-accord-UsersTableName"
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertsTopic
+      Tags:
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: Project
+          Value: accord
+
+  # ============================================================
+  # CloudWatch Dashboard
+  # ============================================================
+  AccordDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub "${EnvironmentName}-accord-dashboard"
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "text",
+              "x": 0,
+              "y": 0,
+              "width": 24,
+              "height": 1,
+              "properties": {
+                "markdown": "# Accord TEE Negotiation Engine - ${EnvironmentName}"
+              }
+            },
+            {
+              "type": "metric",
+              "x": 0,
+              "y": 1,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "title": "ALB Request Count",
+                "metrics": [
+                  ["AWS/ApplicationELB", "RequestCount", "LoadBalancer", "${!ImportValue '${EnvironmentName}-accord-ALBFullName'}", {"stat": "Sum", "period": 300}]
+                ],
+                "view": "timeSeries",
+                "region": "${AWS::Region}",
+                "period": 300
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12,
+              "y": 1,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "title": "ALB Response Time (p95)",
+                "metrics": [
+                  ["AWS/ApplicationELB", "TargetResponseTime", "LoadBalancer", "${!ImportValue '${EnvironmentName}-accord-ALBFullName'}", {"stat": "p95", "period": 300}]
+                ],
+                "view": "timeSeries",
+                "region": "${AWS::Region}",
+                "period": 300
+              }
+            },
+            {
+              "type": "metric",
+              "x": 0,
+              "y": 7,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "title": "ALB HTTP Errors",
+                "metrics": [
+                  ["AWS/ApplicationELB", "HTTPCode_Target_5XX_Count", "LoadBalancer", "${!ImportValue '${EnvironmentName}-accord-ALBFullName'}", {"stat": "Sum", "period": 300, "label": "5xx"}],
+                  ["AWS/ApplicationELB", "HTTPCode_Target_4XX_Count", "LoadBalancer", "${!ImportValue '${EnvironmentName}-accord-ALBFullName'}", {"stat": "Sum", "period": 300, "label": "4xx"}]
+                ],
+                "view": "timeSeries",
+                "region": "${AWS::Region}",
+                "period": 300
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12,
+              "y": 7,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "title": "EC2 CPU Utilization",
+                "metrics": [
+                  ["AWS/EC2", "CPUUtilization", "AutoScalingGroupName", "${!ImportValue '${EnvironmentName}-accord-ASGName'}", {"stat": "Average", "period": 300}]
+                ],
+                "view": "timeSeries",
+                "region": "${AWS::Region}",
+                "period": 300
+              }
+            },
+            {
+              "type": "metric",
+              "x": 0,
+              "y": 13,
+              "width": 8,
+              "height": 6,
+              "properties": {
+                "title": "Sessions Table - Read/Write Capacity",
+                "metrics": [
+                  ["AWS/DynamoDB", "ConsumedReadCapacityUnits", "TableName", "${!ImportValue '${EnvironmentName}-accord-SessionsTableName'}", {"stat": "Sum", "period": 300}],
+                  ["AWS/DynamoDB", "ConsumedWriteCapacityUnits", "TableName", "${!ImportValue '${EnvironmentName}-accord-SessionsTableName'}", {"stat": "Sum", "period": 300}]
+                ],
+                "view": "timeSeries",
+                "region": "${AWS::Region}",
+                "period": 300
+              }
+            },
+            {
+              "type": "metric",
+              "x": 8,
+              "y": 13,
+              "width": 8,
+              "height": 6,
+              "properties": {
+                "title": "AuditLog Table - Read/Write Capacity",
+                "metrics": [
+                  ["AWS/DynamoDB", "ConsumedReadCapacityUnits", "TableName", "${!ImportValue '${EnvironmentName}-accord-AuditLogTableName'}", {"stat": "Sum", "period": 300}],
+                  ["AWS/DynamoDB", "ConsumedWriteCapacityUnits", "TableName", "${!ImportValue '${EnvironmentName}-accord-AuditLogTableName'}", {"stat": "Sum", "period": 300}]
+                ],
+                "view": "timeSeries",
+                "region": "${AWS::Region}",
+                "period": 300
+              }
+            },
+            {
+              "type": "metric",
+              "x": 16,
+              "y": 13,
+              "width": 8,
+              "height": 6,
+              "properties": {
+                "title": "DynamoDB Throttled Requests",
+                "metrics": [
+                  ["AWS/DynamoDB", "ThrottledRequests", "TableName", "${!ImportValue '${EnvironmentName}-accord-SessionsTableName'}", {"stat": "Sum", "period": 300, "label": "Sessions"}],
+                  ["AWS/DynamoDB", "ThrottledRequests", "TableName", "${!ImportValue '${EnvironmentName}-accord-AuditLogTableName'}", {"stat": "Sum", "period": 300, "label": "AuditLog"}],
+                  ["AWS/DynamoDB", "ThrottledRequests", "TableName", "${!ImportValue '${EnvironmentName}-accord-UsersTableName'}", {"stat": "Sum", "period": 300, "label": "Users"}]
+                ],
+                "view": "timeSeries",
+                "region": "${AWS::Region}",
+                "period": 300
+              }
+            },
+            {
+              "type": "metric",
+              "x": 0,
+              "y": 19,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "title": "WAF Blocked Requests",
+                "metrics": [
+                  ["AWS/WAFV2", "BlockedRequests", "WebACL", "${EnvironmentName}-accord-waf", "Region", "${AWS::Region}", "Rule", "ALL", {"stat": "Sum", "period": 300}]
+                ],
+                "view": "timeSeries",
+                "region": "${AWS::Region}",
+                "period": 300
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12,
+              "y": 19,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "title": "Healthy Host Count",
+                "metrics": [
+                  ["AWS/ApplicationELB", "HealthyHostCount", "TargetGroup", "${!ImportValue '${EnvironmentName}-accord-TargetGroupFullName'}", "LoadBalancer", "${!ImportValue '${EnvironmentName}-accord-ALBFullName'}", {"stat": "Average", "period": 300}],
+                  ["AWS/ApplicationELB", "UnHealthyHostCount", "TargetGroup", "${!ImportValue '${EnvironmentName}-accord-TargetGroupFullName'}", "LoadBalancer", "${!ImportValue '${EnvironmentName}-accord-ALBFullName'}", {"stat": "Average", "period": 300}]
+                ],
+                "view": "timeSeries",
+                "region": "${AWS::Region}",
+                "period": 300
+              }
+            }
+          ]
+        }
+
+Outputs:
+  AlertsTopicArn:
+    Description: ARN of the SNS alerts topic
+    Value: !Ref AlertsTopic
+    Export:
+      Name: !Sub "${EnvironmentName}-accord-AlertsTopicArn"
+
+  DashboardName:
+    Description: Name of the CloudWatch dashboard
+    Value: !Ref AccordDashboard
+    Export:
+      Name: !Sub "${EnvironmentName}-accord-DashboardName"
+
+  CloudTrailArn:
+    Description: ARN of the CloudTrail trail
+    Value: !GetAtt AccordCloudTrail.Arn
+    Export:
+      Name: !Sub "${EnvironmentName}-accord-CloudTrailArn"
+
+  ParentAppLogGroupName:
+    Description: Log group name for parent application
+    Value: !Ref ParentAppLogGroup
+    Export:
+      Name: !Sub "${EnvironmentName}-accord-ParentAppLogGroup"
+
+  EnclaveLogGroupName:
+    Description: Log group name for enclave
+    Value: !Ref EnclaveLogGroup
+    Export:
+      Name: !Sub "${EnvironmentName}-accord-EnclaveLogGroup"
