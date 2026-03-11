@@ -42,8 +42,8 @@ variable "environment" {
   default     = "prod"
 
   validation {
-    condition     = contains(["dev", "staging", "prod"], var.environment)
-    error_message = "Environment must be one of: dev, staging, prod."
+    condition     = contains(["dev", "staging", "prod", "hackathon"], var.environment)
+    error_message = "Environment must be one of: dev, staging, prod, hackathon."
   }
 }
 
@@ -98,6 +98,12 @@ variable "max_instances" {
     condition     = var.max_instances >= 1 && var.max_instances <= 20
     error_message = "Maximum instances must be between 1 and 20."
   }
+}
+
+variable "use_spot" {
+  description = "Use Spot VMs for significant cost savings (~60-70%). Spot VMs may be preempted by GCP with short notice. Suitable for development, staging, and hackathon environments. TEE (SEV-SNP) and GPU inference remain fully functional on Spot VMs."
+  type        = bool
+  default     = false
 }
 
 variable "container_image" {

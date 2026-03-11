@@ -192,11 +192,13 @@ resource "google_compute_instance_template" "accord" {
     count = var.gpu_count
   }
 
-  # Required for GPU instances
+  # Required for GPU instances; Spot VMs reduce cost ~60-70% but may be preempted
   scheduling {
-    on_host_maintenance = "TERMINATE"
-    automatic_restart   = true
-    preemptible         = false
+    on_host_maintenance          = "TERMINATE"
+    automatic_restart            = var.use_spot ? false : true
+    preemptible                  = var.use_spot
+    provisioning_model           = var.use_spot ? "SPOT" : "STANDARD"
+    instance_termination_action  = var.use_spot ? "STOP" : null
   }
 
   # Boot disk: SSD, CMEK encrypted

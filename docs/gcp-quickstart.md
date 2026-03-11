@@ -158,6 +158,36 @@ accord/
   aws-enclave/            # Legacy AWS Nitro Enclave code (archived)
 ```
 
+## Hackathon / Development Setup
+
+For hackathons, demos, or short-lived deployments, use the cost-optimized configuration:
+
+```bash
+cd infrastructure/
+cp environments/hackathon.tfvars terraform.tfvars
+# Edit terraform.tfvars: set project_id, domain, alert_email, container_image
+
+terraform init
+terraform plan
+terraform apply
+```
+
+This uses **Spot VMs** (~60-70% cheaper) and a smaller machine type (`g2-standard-8`) while keeping the full TEE (AMD SEV-SNP) and GPU (NVIDIA L4) inference pipeline intact.
+
+**Estimated costs:**
+
+| Duration | Cost |
+|----------|------|
+| 3-day hackathon | ~$21-24 |
+| 1 week | ~$50-60 |
+| 1 month | ~$210-240 |
+
+> **Note:** Spot VMs may be preempted by GCP with short notice. This is acceptable for hackathons but not for production. The VM will automatically restart when capacity becomes available.
+
+To switch back to production settings, use `environments/prod.tfvars` instead.
+
+---
+
 ## Updating the Application
 
 ```bash

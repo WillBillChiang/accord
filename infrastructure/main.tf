@@ -101,6 +101,7 @@ module "compute" {
   min_instances    = var.min_instances
   max_instances    = var.max_instances
   container_image  = var.container_image
+  use_spot         = var.use_spot
   network_self_link        = module.network.vpc_self_link
   private_subnet_self_link = module.network.private_subnet_self_link
   vm_service_account_email = module.security.vm_service_account_email

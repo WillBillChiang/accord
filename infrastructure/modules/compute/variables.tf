@@ -122,3 +122,9 @@ variable "cooldown_period_sec" {
   type        = number
   default     = 300
 }
+
+variable "use_spot" {
+  description = "Use Spot VMs for significant cost savings (~60-70%). Spot VMs may be preempted by GCP with short notice. Suitable for development, staging, and hackathon environments."
+  type        = bool
+  default     = false
+}
