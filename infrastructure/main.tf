@@ -108,6 +108,13 @@ module "compute" {
   kms_crypto_key_id        = module.security.kms_crypto_key_id
   cloud_armor_policy_self_link = module.security.cloud_armor_policy_self_link
 
+  lifecycle {
+    precondition {
+      condition     = var.environment != "prod" || var.domain != null
+      error_message = "Production deployments require a domain for TLS (SOC 2 Type II / ISO 27001 compliance requires encryption in transit)."
+    }
+  }
+
   depends_on = [
     google_project_service.required_apis,
     module.network,

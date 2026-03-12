@@ -13,7 +13,7 @@ region      = "us-central1"
 zone        = "us-central1-a"
 environment = "prod"
 
-domain      = "accord.example.com"
+# domain    = "accord.example.com"  # Optional for non-prod. Omit for HTTP-only access via LB IP.
 alert_email = "ops-team@example.com"
 
 machine_type   = "g2-standard-16"

@@ -22,8 +22,10 @@ min_instances = 1
 max_instances = 1                  # No autoscaling — single instance
 use_spot      = true               # ~60-70% cost savings vs on-demand
 
-# Override these per-deployment:
+# Required — override per-deployment:
 # project_id      = "accord-hackathon-project"
-# domain          = "hackathon.accord.yourdomain.com"
 # alert_email     = "team@yourdomain.com"
-# container_image = "us-central1-docker.pkg.dev/accord-hackathon-project/accord/accord-app:latest"
+# container_image = "us-central1-docker.pkg.dev/project/accord/accord-app:latest"  # Run scripts/build-vm-image.sh to build
+
+# Optional — omit for HTTP-only access via load balancer IP (no SSL, no DNS):
+# domain          = "hackathon.accord.yourdomain.com"

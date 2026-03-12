@@ -53,13 +53,13 @@ output "backend_service_id" {
 }
 
 output "ssl_certificate_name" {
-  description = "Name of the managed SSL certificate."
-  value       = google_compute_managed_ssl_certificate.accord.name
+  description = "Name of the managed SSL certificate. Null when no domain is configured."
+  value       = try(google_compute_managed_ssl_certificate.accord[0].name, null)
 }
 
 output "ssl_policy_name" {
-  description = "Name of the SSL policy (TLS 1.2+)."
-  value       = google_compute_ssl_policy.accord.name
+  description = "Name of the SSL policy (TLS 1.2+). Null when no domain is configured."
+  value       = try(google_compute_ssl_policy.accord[0].name, null)
 }
 
 output "url_map_name" {
@@ -68,16 +68,21 @@ output "url_map_name" {
 }
 
 output "dns_zone_name" {
-  description = "Name of the Cloud DNS managed zone."
-  value       = google_dns_managed_zone.accord.name
+  description = "Name of the Cloud DNS managed zone. Null when no domain is configured."
+  value       = try(google_dns_managed_zone.accord[0].name, null)
 }
 
 output "dns_zone_name_servers" {
-  description = "Name servers for the Cloud DNS managed zone. Configure these at your domain registrar."
-  value       = google_dns_managed_zone.accord.name_servers
+  description = "Name servers for the Cloud DNS managed zone. Null when no domain is configured."
+  value       = try(google_dns_managed_zone.accord[0].name_servers, null)
 }
 
 output "autoscaler_name" {
   description = "Name of the autoscaler."
   value       = google_compute_autoscaler.accord.name
+}
+
+output "access_url" {
+  description = "URL to access the Accord application (HTTPS with domain, HTTP with IP when no domain)."
+  value       = local.has_domain ? "https://${var.domain}" : "http://${google_compute_global_address.lb_ip.address}"
 }

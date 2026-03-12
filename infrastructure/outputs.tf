@@ -88,7 +88,7 @@ output "documents_bucket_url" {
 # Compute Outputs
 # -----------------------------------------------------------------------------
 output "load_balancer_ip" {
-  description = "External IP address of the HTTPS load balancer. Create a DNS A record pointing your domain to this IP."
+  description = "External IP address of the load balancer. When a domain is configured, create a DNS A record pointing to this IP. Otherwise, access the application directly via HTTP on this IP."
   value       = module.compute.load_balancer_ip
 }
 
@@ -98,7 +98,7 @@ output "managed_instance_group_name" {
 }
 
 output "ssl_certificate_name" {
-  description = "Name of the managed SSL certificate. Verify domain ownership for provisioning."
+  description = "Name of the managed SSL certificate. Null when no domain is configured."
   value       = module.compute.ssl_certificate_name
 }
 
@@ -129,6 +129,6 @@ output "notification_channel_name" {
 # DNS Configuration Instructions
 # -----------------------------------------------------------------------------
 output "dns_configuration" {
-  description = "DNS configuration instructions for the domain."
-  value       = "Create an A record for '${var.domain}' pointing to '${module.compute.load_balancer_ip}'. The managed SSL certificate will auto-provision once DNS propagates."
+  description = "DNS configuration instructions, or direct HTTP access info when no domain."
+  value       = var.domain != null ? "Create an A record for '${var.domain}' pointing to '${module.compute.load_balancer_ip}'. The managed SSL certificate will auto-provision once DNS propagates." : "No domain configured. Access the application directly at http://${module.compute.load_balancer_ip} (HTTP only, suitable for dev/hackathon use)."
 }

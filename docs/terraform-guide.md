@@ -297,16 +297,18 @@ Creates the application runtime with Confidential Computing, GPU acceleration, a
 | `google_compute_health_check` | `accord-{env}-health-check` | HTTP check on `/health:8080`, 15s interval |
 | `google_compute_backend_service` | `accord-{env}-backend` | Session affinity (generated cookie, 24h TTL), Cloud Armor attached |
 | `google_compute_url_map` | `accord-{env}-url-map` | Default route to backend service |
-| `google_compute_target_https_proxy` | `accord-{env}-https-proxy` | HTTPS proxy with managed SSL cert and TLS 1.2+ policy |
-| `google_compute_ssl_policy` | `accord-{env}-ssl-policy` | MODERN profile, minimum TLS 1.2 |
 | `google_compute_global_address` | `accord-{env}-lb-ip` | Static external IPv4 for the load balancer |
-| `google_compute_managed_ssl_certificate` | `accord-{env}-ssl-cert` | Google-managed SSL cert for the domain |
-| `google_compute_global_forwarding_rule` (HTTPS) | `accord-{env}-https-fwd-rule` | Port 443 -> HTTPS proxy |
-| `google_compute_url_map` (redirect) | `accord-{env}-http-redirect` | HTTP-to-HTTPS 301 redirect |
-| `google_compute_target_http_proxy` | `accord-{env}-http-redirect-proxy` | HTTP proxy for redirect |
-| `google_compute_global_forwarding_rule` (HTTP) | `accord-{env}-http-redirect-fwd-rule` | Port 80 -> HTTP redirect proxy |
-| `google_dns_managed_zone` | `accord-{env}-dns-zone` | Cloud DNS zone with DNSSEC enabled |
-| `google_dns_record_set` | `{domain}.` | A record pointing to LB IP |
+| `google_compute_target_https_proxy` | `accord-{env}-https-proxy` | HTTPS proxy with managed SSL cert and TLS 1.2+ policy *(domain only)* |
+| `google_compute_ssl_policy` | `accord-{env}-ssl-policy` | MODERN profile, minimum TLS 1.2 *(domain only)* |
+| `google_compute_managed_ssl_certificate` | `accord-{env}-ssl-cert` | Google-managed SSL cert for the domain *(domain only)* |
+| `google_compute_global_forwarding_rule` (HTTPS) | `accord-{env}-https-fwd-rule` | Port 443 -> HTTPS proxy *(domain only)* |
+| `google_compute_url_map` (redirect) | `accord-{env}-http-redirect` | HTTP-to-HTTPS 301 redirect *(domain only)* |
+| `google_compute_target_http_proxy` (redirect) | `accord-{env}-http-redirect-proxy` | HTTP proxy for redirect *(domain only)* |
+| `google_compute_global_forwarding_rule` (redirect) | `accord-{env}-http-redirect-fwd-rule` | Port 80 -> HTTP redirect proxy *(domain only)* |
+| `google_dns_managed_zone` | `accord-{env}-dns-zone` | Cloud DNS zone with DNSSEC enabled *(domain only)* |
+| `google_dns_record_set` | `{domain}.` | A record pointing to LB IP *(domain only)* |
+| `google_compute_target_http_proxy` (HTTP-only) | `accord-{env}-http-proxy` | HTTP proxy for direct backend access *(no-domain only)* |
+| `google_compute_global_forwarding_rule` (HTTP-only) | `accord-{env}-http-fwd-rule` | Port 80 -> HTTP proxy *(no-domain only)* |
 
 **Instance Template Configuration**:
 
@@ -454,12 +456,14 @@ gcloud compute ssl-certificates describe accord-staging-ssl-cert \
 
 These must be supplied via `-var` flags, a `.tfvars` file, or environment variables:
 
-| Variable | Description | Example |
-|---|---|---|
-| `project_id` | GCP project ID | `accord-prod-project` |
-| `domain` | Domain for SSL cert and DNS | `accord.yourdomain.com` |
-| `alert_email` | Email for monitoring alerts | `sre-team@yourdomain.com` |
-| `container_image` | Artifact Registry image URL with tag | `us-central1-docker.pkg.dev/accord-prod-project/accord/tee-engine:v1.0.0` |
+| Variable | Description | Required | Example |
+|---|---|---|---|
+| `project_id` | GCP project ID | Always | `accord-prod-project` |
+| `alert_email` | Email for monitoring alerts | Always | `sre-team@yourdomain.com` |
+| `container_image` | Artifact Registry image URL with tag | Always | `us-central1-docker.pkg.dev/accord-prod-project/accord/tee-engine:v1.0.0` |
+| `domain` | Domain for SSL cert and DNS | Prod only | `accord.yourdomain.com` |
+
+> **Note:** The `domain` variable is optional for non-production environments (`dev`, `staging`, `hackathon`). When omitted, the load balancer serves HTTP-only traffic on port 80 via the static external IP. SSL certificate, DNS zone, and HTTP-to-HTTPS redirect resources are not created. Production deployments enforce `domain` via a Terraform `precondition` for SOC 2 / ISO 27001 TLS compliance.
 
 ### Module-Level Defaults
 

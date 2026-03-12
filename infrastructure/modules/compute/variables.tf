@@ -23,8 +23,9 @@ variable "environment" {
 }
 
 variable "domain" {
-  description = "Domain name for the managed SSL certificate."
+  description = "Domain name for the managed SSL certificate. Null to skip SSL/DNS and use HTTP-only."
   type        = string
+  default     = null
 }
 
 variable "machine_type" {

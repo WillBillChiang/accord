@@ -48,12 +48,13 @@ variable "environment" {
 }
 
 variable "domain" {
-  description = "Domain name for the managed SSL certificate and Cloud DNS zone (e.g., accord.example.com)."
+  description = "Domain name for the managed SSL certificate and Cloud DNS zone (e.g., accord.example.com). Optional for non-production environments — omit to use HTTP-only access via load balancer IP."
   type        = string
+  default     = null
 
   validation {
-    condition     = can(regex("^[a-z0-9][a-z0-9.-]+[a-z0-9]$", var.domain))
-    error_message = "Domain must be a valid domain name."
+    condition     = var.domain == null || can(regex("^[a-z0-9][a-z0-9.-]+[a-z0-9]$", var.domain))
+    error_message = "Domain must be null or a valid domain name."
   }
 }
 

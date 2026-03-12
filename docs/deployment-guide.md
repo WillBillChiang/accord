@@ -131,7 +131,7 @@ boot_disk_size_gb  = 100
 rate_limit_threshold = 2000
 rate_limit_interval  = 300
 
-# DNS
+# DNS (optional for non-prod -- omit for HTTP-only access via LB IP)
 domain_name     = "accord.example.com"
 api_domain      = "api.accord.example.com"
 app_domain      = "app.accord.example.com"

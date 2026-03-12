@@ -25,6 +25,8 @@ locals {
 
   vm_tags = ["accord-vm", "allow-health-check"]
 
+  has_domain = var.domain != null && var.domain != ""
+
   # Startup script installs NVIDIA drivers, Docker, pulls and runs the container
   startup_script = <<-STARTUP
     #!/bin/bash
@@ -148,6 +150,7 @@ resource "google_compute_global_address" "lb_ip" {
 # Managed SSL Certificate
 # =============================================================================
 resource "google_compute_managed_ssl_certificate" "accord" {
+  count   = local.has_domain ? 1 : 0
   name    = "${local.name_prefix}-ssl-cert"
   project = var.project_id
 
@@ -374,19 +377,21 @@ resource "google_compute_url_map" "accord" {
 # Target HTTPS Proxy
 # =============================================================================
 resource "google_compute_target_https_proxy" "accord" {
+  count            = local.has_domain ? 1 : 0
   name             = "${local.name_prefix}-https-proxy"
   project          = var.project_id
   description      = "HTTPS proxy for Accord load balancer with managed SSL certificate."
   url_map          = google_compute_url_map.accord.id
-  ssl_certificates = [google_compute_managed_ssl_certificate.accord.id]
+  ssl_certificates = [google_compute_managed_ssl_certificate.accord[0].id]
 
-  ssl_policy = google_compute_ssl_policy.accord.id
+  ssl_policy = google_compute_ssl_policy.accord[0].id
 }
 
 # =============================================================================
 # SSL Policy (TLS 1.2+ only for compliance)
 # =============================================================================
 resource "google_compute_ssl_policy" "accord" {
+  count           = local.has_domain ? 1 : 0
   name            = "${local.name_prefix}-ssl-policy"
   project         = var.project_id
   description     = "SSL policy enforcing TLS 1.2+ with MODERN profile for SOC 2 / ISO 27001 compliance."
@@ -398,13 +403,14 @@ resource "google_compute_ssl_policy" "accord" {
 # Global Forwarding Rule (HTTPS on port 443)
 # =============================================================================
 resource "google_compute_global_forwarding_rule" "accord_https" {
+  count                 = local.has_domain ? 1 : 0
   name                  = "${local.name_prefix}-https-fwd-rule"
   project               = var.project_id
   description           = "Global forwarding rule for Accord HTTPS traffic on port 443."
   ip_address            = google_compute_global_address.lb_ip.address
   ip_protocol           = "TCP"
   port_range            = "443"
-  target                = google_compute_target_https_proxy.accord.id
+  target                = google_compute_target_https_proxy.accord[0].id
   load_balancing_scheme = "EXTERNAL"
 }
 
@@ -412,6 +418,7 @@ resource "google_compute_global_forwarding_rule" "accord_https" {
 # HTTP to HTTPS Redirect
 # =============================================================================
 resource "google_compute_url_map" "http_redirect" {
+  count       = local.has_domain ? 1 : 0
   name        = "${local.name_prefix}-http-redirect"
   project     = var.project_id
   description = "URL map that redirects all HTTP traffic to HTTPS."
@@ -424,20 +431,22 @@ resource "google_compute_url_map" "http_redirect" {
 }
 
 resource "google_compute_target_http_proxy" "http_redirect" {
+  count       = local.has_domain ? 1 : 0
   name        = "${local.name_prefix}-http-redirect-proxy"
   project     = var.project_id
   description = "HTTP proxy for HTTP-to-HTTPS redirect."
-  url_map     = google_compute_url_map.http_redirect.id
+  url_map     = google_compute_url_map.http_redirect[0].id
 }
 
 resource "google_compute_global_forwarding_rule" "http_redirect" {
+  count                 = local.has_domain ? 1 : 0
   name                  = "${local.name_prefix}-http-redirect-fwd-rule"
   project               = var.project_id
   description           = "Global forwarding rule that redirects HTTP (port 80) to HTTPS (port 443)."
   ip_address            = google_compute_global_address.lb_ip.address
   ip_protocol           = "TCP"
   port_range            = "80"
-  target                = google_compute_target_http_proxy.http_redirect.id
+  target                = google_compute_target_http_proxy.http_redirect[0].id
   load_balancing_scheme = "EXTERNAL"
 }
 
@@ -445,6 +454,7 @@ resource "google_compute_global_forwarding_rule" "http_redirect" {
 # Cloud DNS Managed Zone
 # =============================================================================
 resource "google_dns_managed_zone" "accord" {
+  count       = local.has_domain ? 1 : 0
   name        = "${local.name_prefix}-dns-zone"
   project     = var.project_id
   dns_name    = "${var.domain}."
@@ -460,10 +470,36 @@ resource "google_dns_managed_zone" "accord" {
 
 # A record pointing domain to the load balancer IP
 resource "google_dns_record_set" "accord_a" {
+  count        = local.has_domain ? 1 : 0
   name         = "${var.domain}."
   project      = var.project_id
-  managed_zone = google_dns_managed_zone.accord.name
+  managed_zone = google_dns_managed_zone.accord[0].name
   type         = "A"
   ttl          = 300
   rrdatas      = [google_compute_global_address.lb_ip.address]
+}
+
+# =============================================================================
+# HTTP-only mode (when no domain is configured)
+# Serves traffic on port 80 directly to the backend without SSL.
+# Acceptable for hackathon/dev environments only.
+# =============================================================================
+resource "google_compute_target_http_proxy" "accord_http" {
+  count       = local.has_domain ? 0 : 1
+  name        = "${local.name_prefix}-http-proxy"
+  project     = var.project_id
+  description = "HTTP proxy for Accord load balancer (no-domain mode, no SSL)."
+  url_map     = google_compute_url_map.accord.id
+}
+
+resource "google_compute_global_forwarding_rule" "accord_http" {
+  count                 = local.has_domain ? 0 : 1
+  name                  = "${local.name_prefix}-http-fwd-rule"
+  project               = var.project_id
+  description           = "Global forwarding rule for Accord HTTP traffic on port 80 (no-domain mode)."
+  ip_address            = google_compute_global_address.lb_ip.address
+  ip_protocol           = "TCP"
+  port_range            = "80"
+  target                = google_compute_target_http_proxy.accord_http[0].id
+  load_balancing_scheme = "EXTERNAL"
 }
